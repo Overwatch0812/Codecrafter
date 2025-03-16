@@ -10,7 +10,7 @@ async def simulate_bof_response():
     
     # Random delay between 10 to 50 seconds
     delay = random.randint(10, 50)
-    await asyncio.sleep(2)  # Non-blocking sleep
+    await asyncio.sleep(delay)  # Non-blocking sleep
     
     # Randomly select a row
     random_row = df.sample(n=1).iloc[0]

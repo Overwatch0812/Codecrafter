@@ -1,22 +1,24 @@
-import json
-import cv2
-import asyncio
-import datetime
-import random
-from channels.generic.websocket import AsyncWebsocketConsumer
-from .main2 import detection
-from channels.exceptions import StopConsumer
-from .bof import simulate_bof_response
-from .audio import AudioFrequencyDetector
+import json 
+import cv2 
+import asyncio 
+import datetime 
+import random 
+from channels.generic.websocket import AsyncWebsocketConsumer 
+from .main2 import detection 
+from channels.exceptions import StopConsumer 
+from .bof import simulate_bof_response 
+from .audio import AudioFrequencyDetector 
+from .upload import uploadImage 
 
-class RandomConsumer(AsyncWebsocketConsumer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.alert_counter = 0  # Counter for sequential alert numbering
-        self.frequency = None  # Store the latest detected frequency
-        self.bof_data = None   # Store the latest BOF data
-        self.camera_data = None  # Store the latest camera detection data
-    
+class RandomConsumer(AsyncWebsocketConsumer): 
+    def __init__(self, *args, **kwargs): 
+        super().__init__(*args, **kwargs) 
+        self.alert_counter = 0 # Counter for sequential alert numbering 
+        self.frequency = None # Store the latest detected frequency 
+        self.bof_data = None # Store the latest BOF data 
+        self.camera_data = None # Store the latest camera detection 
+        self.imgCount = 1
+        
     async def connect(self):
         # Store tasks and initialize camera
         self.tasks = []
@@ -51,7 +53,7 @@ class RandomConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             print(f"Error during connection: {e}")
             await self.close()
-    
+
     async def initialize_camera(self):
         try:
             if self.camera:
@@ -65,7 +67,7 @@ class RandomConsumer(AsyncWebsocketConsumer):
         except Exception as e:
             print(f"Camera initialization error: {e}")
             return False
-    
+
     async def release_camera(self):
         if self.camera:
             try:
@@ -81,9 +83,17 @@ class RandomConsumer(AsyncWebsocketConsumer):
                 print(f"Camera release error: {e}")
                 return False
         return True
-    
+
     def create_unified_alert(self):
         """Create a unified alert with all sensor data"""
+        # Capture frame at the beginning
+        frame = None
+        if self.camera and self.camera.isOpened():
+            ret, frame = self.camera.read()
+            if not ret:
+                print("Failed to capture frame for alert")
+                frame = None
+                
         # Generate random weather data (in a real system, this would come from sensors)
         weather_conditions = ["Clear", "Cloudy", "Foggy", "Rainy"]
         weather = {
@@ -91,43 +101,120 @@ class RandomConsumer(AsyncWebsocketConsumer):
             "conditions": random.choice(weather_conditions)
         }
         
-        # Determine the primary alert type based on available data
-        alert_type = "status_update"  # Default type
-        description = "Sensor status update"
-        severity = "low"
-        
-        # If we have camera detection, prioritize it
+        # Initialize lists for alert information
+        alert_types = []
+        descriptions = []
+        severities = []
+        detected_objects = []
+
+        # Process camera data if available
         if self.camera_data:
-            detection_type = self.camera_data.get("type", "movement") if isinstance(self.camera_data, dict) else "movement"
-            if detection_type == "person" or detection_type == "vehicle":
-                alert_type = "intrusion"
-                description = f"{detection_type.capitalize()} detected"
-                severity = "high"
+            if self.camera_data.get('is crowded', False):
+                alert_types.append("crowded")
+                descriptions.append("Crowd detected. ")
+                severities.append("low")
+            
+            detected_objects = self.camera_data.get("detected objects", [])
+            if any(obj in ["knife"] for obj in detected_objects):
+                alert_types.append("violence")
+                descriptions.append("Potential weapon detected. ")
+                severities.append("high")
+            
+            # Only add "None" if no other alerts were added from camera data
+            if not alert_types:
+                alert_types.append("none")
+                severities.append("none")
+        
+        # Process BOF data if available
+        if self.bof_data:
+            bof_type = self.bof_data.get("Event Type", "unknown")
+            bof_intensity = float(self.bof_data.get("Intensity (dB)", 0))
+            
+            alert_types.append("anomaly")
+            descriptions.append(f"BOF {bof_type} detected. ")
+            
+            if bof_intensity <= 20:
+                severities.append("low")
+            elif bof_intensity <= 70:
+                severities.append("medium")
             else:
-                alert_type = "movement"
-                description = "Movement detected"
-                severity = "medium"
+                severities.append("high")
+        else:
+            if not alert_types:
+                alert_types.append("none")
+                severities.append("none")
         
-        # If we have BOF data, consider it
-        elif self.bof_data:
-            bof_type = self.bof_data.get("type", "anomaly") if isinstance(self.bof_data, dict) else "anomaly"
-            alert_type = "anomaly"
-            description = f"BOF {bof_type} detected"
-            severity = "medium"
+        # Process audio frequency data if available
+        if self.frequency:
+            try:
+                freq = float(self.frequency)
+                alert_types.append("audio_anomaly")
+                
+                if freq > 2500:
+                    severities.append("high")
+                    descriptions.append(f"Unusual audio frequency: {freq:.1f} Hz. ")
+                elif freq > 1000:
+                    severities.append("low")
+                    descriptions.append(f"Unusual audio frequency: {freq:.1f} Hz. ")
+                else:
+                    severities.append("none")
+            except (ValueError, TypeError):
+                # Handle case where frequency is not a valid number
+                pass
+        else:
+            if not alert_types:
+                alert_types.append("none")
+                severities.append("none")
+
+        desc = "".join(descriptions) if descriptions else "No alerts detected."
         
-        # If we have significant audio data, consider it
-        elif self.frequency and self.frequency > 500:
-            alert_type = "audio_anomaly"
-            description = f"Unusual audio frequency: {self.frequency} Hz"
-            severity = "medium"
+        # Calculate overall severity
+        severity_weights = {
+            "none": 0,
+            "low": 0.3,
+            "medium": 0.6,
+            "high": 0.9
+        }
+        
+        # Default severity if no data
+        if not severities:
+            overall_severity = "none"
+        else:
+            # Calculate weighted average
+            total_weight = 0
+            for s in severities:
+                total_weight += severity_weights.get(s.lower(), 0)
+            
+            avg_weight = total_weight / len(severities) if severities else 0
+            
+            # Determine overall severity based on average weight
+            if avg_weight >= 0.7:
+                overall_severity = "high"
+            elif avg_weight >= 0.4:
+                overall_severity = "medium"
+            elif avg_weight > 0:
+                overall_severity = "low"
+            else:
+                overall_severity = "none"
+        
+        # Determine audio severity for the sensor data section
+        audio_severity = "none"
+        if self.frequency:
+            freq = float(self.frequency) if isinstance(self.frequency, (int, float, str)) else 0
+            if freq > 2500:
+                audio_severity = "high"
+            elif freq > 1500:
+                audio_severity = "medium"
+            elif freq > 0:
+                audio_severity = "low"
         
         # Create the unified alert object
         alert = {
-            "type": alert_type,
-            "severity": severity,
+            "type": alert_types,
+            "severity": overall_severity,
             "timestamp": datetime.datetime.now().isoformat(),
             "location": "Security System",
-            "description": description,
+            "description": desc,
             "sensorData": {
                 "video": {
                     "active": self.camera is not None and self.camera.isOpened(),
@@ -136,30 +223,43 @@ class RandomConsumer(AsyncWebsocketConsumer):
                 "bof": self.bof_data,
                 "audio": {
                     "frequency": self.frequency,
-                    "alert": False  # Example threshold
+                    "severity": audio_severity
                 },
                 "vibration": bool(random.getrandbits(1)),  # Random for demo
                 "thermal": bool(random.getrandbits(1)),    # Random for demo
                 "weather": weather
             },
             "status": "unresolved",
-            "thumbnail": "/api/placeholder/300/200"  # Placeholder, in real app you'd save the frame
+            "thumbnail": "/api/placeholder/300/200"  # Placeholder, will be updated if image upload succeeds
         }
         
-        return alert
-    
+        isKnife = any(obj in ["knife"] for obj in detected_objects)
+        return alert, overall_severity, isKnife, frame
+
     async def send_unified_alerts(self):
         """Send unified alerts at regular intervals"""
         try:
             while True:
                 # Create a unified alert with all current sensor data
-                alert = self.create_unified_alert()
+                alert, overall_severity, isKnife, frame = self.create_unified_alert()
                 
-                # Send the unified alert
-                await self.send(text_data=json.dumps({
-                    'type': 'alert',
-                    'data': alert
-                }))
+                if overall_severity == "high" or isKnife:
+                    if frame is not None:
+                        print(f"Uploading image {self.imgCount}")
+                        wc_url = uploadImage(frame, f"webimg{self.imgCount}")
+                        self.imgCount += 1
+                        if wc_url:
+                            alert['thumbnail'] = wc_url
+                            print(f"Image uploaded successfully: {wc_url}")
+                        else:
+                            print("Image upload failed")
+                    else:
+                        print("No frame available for upload")
+                    
+                    await self.send(text_data=json.dumps({
+                        'type': 'alert',
+                        'data': alert
+                    }))
                 
                 # Wait a short time before sending the next update
                 await asyncio.sleep(0.5)  # Send updates twice per second
@@ -167,14 +267,18 @@ class RandomConsumer(AsyncWebsocketConsumer):
             raise
         except Exception as e:
             print(f"Alert sending error: {e}")
-    
+
     async def process_camera_feed(self):
         try:
             frame_count = 0
+            consecutive_errors = 0
+            max_consecutive_errors = 5
+            
             while True:
                 if not self.camera:
                     print("Camera not initialized")
                     await asyncio.sleep(1)
+                    await self.initialize_camera()
                     continue
                     
                 if not self.camera.isOpened():
@@ -184,19 +288,42 @@ class RandomConsumer(AsyncWebsocketConsumer):
                         await asyncio.sleep(2)
                         continue
                 
-                # Process a single frame
-                result = detection(self.camera)
-                frame_count += 1
-                
-                # Periodically check camera status
-                if frame_count % 100 == 0:
-                    if not self.camera.isOpened():
-                        print("Camera connection was lost, trying to reinitialize")
+                try:
+                    # Process a single frame
+                    ret, frame = self.camera.read()
+                    if not ret:
+                        consecutive_errors += 1
+                        print(f"Failed to read frame. Consecutive errors: {consecutive_errors}")
+                        
+                        if consecutive_errors >= max_consecutive_errors:
+                            print("Too many consecutive errors, reinitializing camera...")
+                            await self.release_camera()
+                            await asyncio.sleep(1)
+                            await self.initialize_camera()
+                            consecutive_errors = 0
+                        
+                        await asyncio.sleep(0.5)
+                        continue
+                    
+                    # Reset error counter on successful frame read
+                    consecutive_errors = 0
+                    
+                    # Process the frame with detection
+                    result = detection(self.camera)
+                    frame_count += 1
+                    
+                    # Update camera data if we have a detection
+                    if result:
+                        self.camera_data = result
+                    
+                except Exception as e:
+                    print(f"Error processing camera frame: {e}")
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        await self.release_camera()
+                        await asyncio.sleep(1)
                         await self.initialize_camera()
-                
-                # Update camera data if we have a detection
-                if result:
-                    self.camera_data = result
+                        consecutive_errors = 0
                 
                 # Add a small delay to prevent overwhelming the system
                 await asyncio.sleep(0.05)  # ~20 fps
@@ -206,7 +333,7 @@ class RandomConsumer(AsyncWebsocketConsumer):
             raise
         except Exception as e:
             print(f"Camera feed error: {e}")
-    
+
     async def process_bof(self):
         try:
             while True:
@@ -245,7 +372,7 @@ class RandomConsumer(AsyncWebsocketConsumer):
             raise
         except Exception as e:
             print(f"Audio processing error: {e}")
-    
+
     async def disconnect(self, close_code):
         print('Disconnecting, cleaning up resources...')
         
@@ -268,7 +395,7 @@ class RandomConsumer(AsyncWebsocketConsumer):
         
         # Now raise StopConsumer
         raise StopConsumer()
-    
+
     async def receive(self, text_data):
         try:
             text_data_json = json.loads(text_data)

@@ -52,7 +52,7 @@ import cv2
 from ultralytics import YOLO
 
 # Load YOLO Model
-model = YOLO('yolo11n.pt')
+model = YOLO('yolov8n.pt')
 cap=cv2.VideoCapture(0)
 
 # COCO Classes
@@ -95,7 +95,7 @@ def detection(cap):
         print(f"Total Persons Detected: {personCount}")
 
         isCrowded = False
-        if personCount > 4:
+        if personCount > 2:
             isCrowded = True
 
         return {'detected objects': detected_objects, 'is crowded': isCrowded}
