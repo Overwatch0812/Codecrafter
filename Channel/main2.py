@@ -95,7 +95,7 @@ def detection(cap):
         print(f"Total Persons Detected: {personCount}")
 
         isCrowded = False
-        if personCount > 2:
+        if personCount > 1:
             isCrowded = True
 
         return {'detected objects': detected_objects, 'is crowded': isCrowded}
