@@ -155,7 +155,7 @@ class RandomConsumer(AsyncWebsocketConsumer):
         weather_conditions = ["Clear", "Cloudy", "Foggy", "Rainy"]
         weather = {
             "temp": round(random.uniform(10, 30), 1),
-            "conditions": random.choice(weather_conditions)
+            "conditions": "Foggy"
         }
         
         alert_types, descriptions, severities = [], [], []
@@ -290,7 +290,7 @@ class RandomConsumer(AsyncWebsocketConsumer):
             "type": alert_types or ["none"],
             "severity": overall_severity,
             "timestamp": datetime.datetime.now().isoformat(),
-            "location": "Security System",
+            "location": "West Gate",
             "description": "".join(descriptions) or "No alerts detected.",
             "sensorData": {
                 "video": {"active": self.camera is not None and self.camera.isOpened(), "detection": self.camera_data},
